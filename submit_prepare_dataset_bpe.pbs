@@ -1,0 +1,32 @@
+#!/bin/bash
+#PBS -P CFP01-CF-060
+#PBS -N prepare_dataset_bpe
+#PBS -q auto
+#PBS -l select=1:ngpus=1
+#PBS -l walltime=24:00:00
+#PBS -j oe
+
+cd $PBS_O_WORKDIR
+
+module load singularity
+IMAGE="/app1/common/singularity-img/hopper/pytorch/pytorch_2.8.0_cuda_13.0.sif"
+
+singularity exec -e $IMAGE bash << EOF \
+    > "/scratch/Projects/CFP-01/CFP01-CF-060/kieron/$PBS_JOBNAME.$PBS_JOBID.stdout.log" \
+    2> "/scratch/Projects/CFP-01/CFP01-CF-060/kieron/$PBS_JOBNAME.$PBS_JOBID.stderr.log"
+
+source /hpctmp/e0968891/virtualenvs/fyp/bin/activate
+
+python /scratch/Projects/CFP-01/CFP01-CF-060/kieron/prepare_dataset_bpe.py \
+    /scratch/Projects/CFP-01/CFP01-CF-060/kieron/data/fineweb2_SEA_100M_sentences \
+    -o /scratch/Projects/CFP-01/CFP01-CF-060/kieron/data/fineweb2_SEA_100M_sentences_byte-level \
+    --tokenizer-file /scratch/Projects/CFP-01/CFP01-CF-060/kieron/90k_byte-level_SEA_1m/tokenizer.json \
+    --workers 32
+
+python /scratch/Projects/CFP-01/CFP01-CF-060/kieron/prepare_dataset_bpe.py \
+    /scratch/Projects/CFP-01/CFP01-CF-060/kieron/data/fineweb2_SEA_100M_sentences \
+    -o /scratch/Projects/CFP-01/CFP01-CF-060/kieron/data/fineweb2_SEA_100M_sentences_parity-aware \
+    --tokenizer-file /scratch/Projects/CFP-01/CFP01-CF-060/kieron/90k_parity-aware_SEA_1m/tokenizer.json \
+    --workers 32
+
+EOF

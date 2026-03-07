@@ -1,0 +1,9 @@
+[submodule "myte"]
+	path = myte
+	url = https://github.com/Cikguseven/MYTE.git
+[submodule "blt"]
+	path = blt
+	url = https://github.com/Cikguseven/BLT.git
+[submodule "parity-aware-bpe"]
+	path = parity-aware-bpe
+	url = https://github.com/Cikguseven/Parity-Aware-BPE.git

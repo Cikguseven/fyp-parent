@@ -1,0 +1,58 @@
+#!/bin/bash
+#PBS -P CFP01-CF-060
+#PBS -j oe
+#PBS -o /scratch/Projects/CFP-01/CFP01-CF-060/kieron/logs/blt_dual_node.log
+#PBS -N blt_dual_node
+#PBS -l select=2:ngpus=8
+#PBS -l walltime=48:00:00
+
+# Set working directory to your project folder
+cd /scratch/Projects/CFP-01/CFP01-CF-060/kieron
+
+# Load API keys and env vars securely
+export $(grep -v '^#' .env | xargs)
+
+echo "Loading openMPI..."
+module load openmpi4
+
+# Generate random port and identify master node
+shuf -i 30000-40000 -n 2 > master_ports
+head -n 1 $PBS_NODEFILE > master_node_pbs
+
+echo "Fetching Master Node IP via MPI..."
+mpirun -np 1 --hostfile master_node_pbs bash -c "/usr/sbin/ip addr show bond0 | grep 'inet ' | head -n 1 | awk '{print \$2}' | cut -d '/' -f1 > master_node"
+
+master_node=$(cat master_node)
+port=$(sed -n '1p' master_ports)
+port2=$(sed -n '2p' master_ports)
+
+echo "Master Node: $master_node | Stage1 Port: $port | Stage2 Port: $port2"
+
+# ---------------------------------------------------------
+# NEW: Optimized NCCL, InfiniBand, and GPUDirect Variables
+# ---------------------------------------------------------
+export NCCL_IB_DISABLE=0
+export NCCL_IB_HCA="mlx5_0:1,mlx5_1:1,mlx5_2:1,mlx5_3:1,mlx5_4:1,mlx5_7:1,mlx5_8:1,mlx5_9:1,^irdma_bond0"
+export NCCL_SOCKET_IFNAME=bond0
+export NCCL_P2P_DISABLE=0
+export NCCL_DEBUG=INFO
+export NCCL_NET_GDR_LEVEL=2
+export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+export NCCL_NVLS_ENABLE=1
+
+# Launch the wrapper script on both nodes.
+# CRITICAL: Pass all new optimization variables using -x
+mpirun -np 2 \
+    -x WANDB_API_KEY \
+    -x NCCL_IB_DISABLE \
+    -x NCCL_IB_HCA \
+    -x NCCL_SOCKET_IFNAME \
+    -x NCCL_P2P_DISABLE \
+    -x NCCL_DEBUG \
+    -x NCCL_NET_GDR_LEVEL \
+    -x CUDA_VISIBLE_DEVICES \
+    -x NCCL_NVLS_ENABLE \
+    bash /scratch/Projects/CFP-01/CFP01-CF-060/kieron/wrapper-dual-node.sh ${master_node} ${port} ${port2} 2
+
+echo "PBS Job Done"
+sleep 10

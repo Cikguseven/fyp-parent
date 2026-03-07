@@ -1,0 +1,29 @@
+#!/bin/bash
+#PBS -P CFP01-CF-060
+#PBS -N prepare_dataset_myte
+#PBS -q auto
+#PBS -l select=1:ncpus=96:ngpus=0
+#PBS -l walltime=96:00:00
+#PBS -j oe
+
+cd $PBS_O_WORKDIR
+
+module load singularity
+IMAGE="/app1/common/singularity-img/hopper/pytorch/pytorch_2.8.0_cuda_13.0.sif"
+
+singularity exec -e $IMAGE bash << EOF \
+    > "/scratch/Projects/CFP-01/CFP01-CF-060/kieron/$PBS_JOBNAME.$PBS_JOBID.stdout.log" \
+    2> "/scratch/Projects/CFP-01/CFP01-CF-060/kieron/$PBS_JOBNAME.$PBS_JOBID.stderr.log"
+
+source /hpctmp/e0968891/virtualenvs/fyp/bin/activate
+
+python /scratch/Projects/CFP-01/CFP01-CF-060/kieron/prepare_dataset_myte.py \
+    /scratch/Projects/CFP-01/CFP01-CF-060/kieron/data/fineweb2_SEA_100M_sentences \
+    -o /scratch/Projects/CFP-01/CFP01-CF-060/kieron/data/fineweb2_SEA_100M_sentences_myte \
+    --decompose-map-path /scratch/Projects/CFP-01/CFP01-CF-060/kieron/8192_myte_SEA_1m/decompose.json \
+    --merge-map-path /scratch/Projects/CFP-01/CFP01-CF-060/kieron/8192_myte_SEA_1m/morf_map_mc4_8192.json \
+    --dtype uint16 \
+    --eos-token-id 1 \
+    --workers 16
+
+EOF

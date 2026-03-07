@@ -1,0 +1,140 @@
+run_name: myte_stage1_dual
+seed: 6198
+dry_run: false
+
+wandb:
+  name: ${run_name}
+  project: Training
+  entity: cikguseven-national-university-of-singapore
+  group: ${run_name}
+
+model:
+  d_model: 2048
+  n_heads: 16
+  n_layers: 20
+  mlp_ratio: 8
+  weight_tying: false
+  alibi: false
+  rope: true
+  rope_theta: 500000
+  flash_attention: true
+  attention_dropout: 0.0
+  include_bias: false
+  block_type: sequential
+  layer_norm_type: rms
+  layer_norm_with_affine: true
+  layer_norm_eps: 1e-6
+  bias_for_layer_norm: false
+  attention_layer_norm: true
+  attention_layer_norm_with_affine: true
+  norm_after: true
+  activation_type: swiglu
+  residual_dropout: 0.0
+  embedding_dropout: 0.0
+  max_sequence_length: 4096
+  vocab_size: 384
+  embedding_size: 384
+  eos_token_id: 1
+  pad_token_id: 0
+  init_device: meta
+  init_fn: normal
+  init_std: 0.02
+  init_cutoff_factor: 3
+
+softmax_auxiliary_loss: true
+auxiliary_loss_multiplier: 1e-5
+fused_loss: true
+
+compile: null
+
+optimizer:
+  name: adamw
+  learning_rate: 4.0e-4
+  weight_decay: 0.1
+  eps: 1e-8
+  decay_norm_and_bias: true
+  decay_embeddings: false
+  betas:
+  - 0.9
+  - 0.95
+  metrics_log_interval: 1
+
+scheduler:
+  name: constant_with_warmup
+  units: tokens
+  t_warmup: 250000000 # around 0.1% of 269B tokens
+  alpha_f: 0.1
+
+tokenizer:
+  identifier: /scratch/Projects/CFP-01/CFP01-CF-060/kieron/8192_myte_SEA_1m
+  truncate_direction: right
+  use_transformers_tokenizer: true
+
+save_folder: /scratch/Projects/CFP-01/CFP01-CF-060/kieron/olmo/evaluation/myte_stage1_dual
+save_overwrite: true
+
+save_interval: 1000 # steps
+save_interval_ephemeral: 200
+save_num_checkpoints_to_keep: 2
+sharded_checkpointer: olmo_core
+
+save_interval_unsharded: 1000
+save_num_unsharded_checkpoints_to_keep: 2
+
+load_path: /scratch/Projects/CFP-01/CFP01-CF-060/kieron/olmo/evaluation/backup/myte_stage1/step60000
+
+max_duration: 1ep
+stop_at: 115600 # 90% of tokens
+global_train_batch_size: 512
+device_train_microbatch_size: 8
+
+precision: amp_bf16
+
+fsdp:
+  wrapping_strategy: null
+  sharding_strategy: SHARD_GRAD_OP
+  precision: mixed
+
+max_grad_norm: 1.0
+max_grad_norm_ratio: null
+
+speed_monitor:
+  window_size: 1
+
+gen1_gc_interval: 10
+
+eval_interval: 5000 #UPDATE AFTER TOKENIZATION OF DATASET
+eval_subset_num_batches: -1
+device_eval_batch_size: ${device_train_microbatch_size}
+evaluators:
+  ##########################
+  # Downstream evaluations #
+  ##########################
+  - label: piqa
+    type: downstream
+
+  - label: hellaswag
+    type: downstream
+
+  - label: arc_easy
+    type: downstream
+
+  - label: arc_challenge
+    type: downstream
+
+data:
+  shuffle: true
+  pad_direction: right
+  # generate_doc_lengths: true
+  num_workers: 32
+  drop_last: true
+  pin_memory: true
+  prefetch_factor: 8
+  persistent_workers: true
+  memmap_dtype: uint16
+  timeout: 0
+  instance_filter:
+    repetition_max_period: 13
+    repetition_min_period: 1
+    repetition_max_count: 32
+  paths: ${path.glob:/scratch/Projects/CFP-01/CFP01-CF-060/kieron/data/fineweb2_SEA_100M_sentences_myte/*.npy}

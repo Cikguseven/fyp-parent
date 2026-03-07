@@ -1,0 +1,16 @@
+#!/bin/bash
+#PBS -P CFP01-CF-060
+#PBS -N untar
+#PBS -q auto
+#PBS -l select=1:ngpus=1
+#PBS -l walltime=12:00:00
+#PBS -j oe
+#PBS -o /scratch/Projects/CFP-01/CFP01-CF-060/kieron/untar.log
+
+cd $PBS_O_WORKDIR
+
+echo "Starting at $(date)"
+
+pv -f /scratch/Projects/CFP-01/CFP01-CF-060/kieron/data/fineweb2_SEA_dir_b.tar | tar --transform='s,^,a_,' --blocking-factor=512 --no-same-permissions --no-same-owner -x -C /scratch/Projects/CFP-01/CFP01-CF-060/kieron/data/fineweb2_SEA_100M_sentences_myte
+
+echo "Finished at $(date)"

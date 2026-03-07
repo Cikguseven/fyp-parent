@@ -1,0 +1,30 @@
+#!/bin/bash
+#PBS -P CFP01-CF-060
+#PBS -N blt_eval_2
+#PBS -q auto
+#PBS -l select=1:ngpus=2
+#PBS -l walltime=48:00:00
+#PBS -j oe
+
+export APPTAINERENV_TORCHMETRICS_SKIP_IMAGE_DIST_TESTS=1
+
+cd $PBS_O_WORKDIR
+
+MASTER_PORT=$(( 20000 + (${PBS_JOBID%%.*} % 10000) ))
+
+module load singularity
+IMAGE="/app1/common/singularity-img/hopper/cuda/cuda_12.1.0-cudnn8-devel-u20.04.sif"
+
+singularity exec -e $IMAGE bash << EOF \
+    > "/scratch/Projects/CFP-01/CFP01-CF-060/kieron/$PBS_JOBNAME.$PBS_JOBID.stdout.log" \
+    2> "/scratch/Projects/CFP-01/CFP01-CF-060/kieron/$PBS_JOBNAME.$PBS_JOBID.stderr.log"
+
+source /hpctmp/e0968891/virtualenvs/cuda/bin/activate
+
+echo "Starting at $(date)"
+
+torchrun --nproc_per_node=2 --master_port=$MASTER_PORT \
+    /scratch/Projects/CFP-01/CFP01-CF-060/kieron/blt/bytelatent/eval.py \
+    --config /scratch/Projects/CFP-01/CFP01-CF-060/kieron/blt/apps/main/configs/eval_2.yaml
+
+EOF

@@ -1,0 +1,39 @@
+#!/bin/bash
+#PBS -P CFP01-CF-060
+#PBS -N blt_train
+#PBS -q auto
+#PBS -l select=1:ngpus=8
+#PBS -l walltime=96:00:00
+#PBS -j oe
+
+cd /scratch/Projects/CFP-01/CFP01-CF-060/kieron
+export $(grep -v '^#' .env | xargs)
+
+export APPTAINERENV_WANDB_API_KEY=$WANDB_API_KEY
+export APPTAINERENV_WANDB_ENTITY="cikguseven-national-university-of-singapore"
+export APPTAINERENV_WANDB_PROJECT="Training"
+export APPTAINERENV_WANDB_DIR="/scratch/Projects/CFP-01/CFP01-CF-060/kieron/logs"
+export APPTAINERENV_TORCHMETRICS_SKIP_IMAGE_DIST_TESTS=1
+
+cd $PBS_O_WORKDIR
+
+module load singularity
+IMAGE="/app1/common/singularity-img/hopper/cuda/cuda_12.1.0-cudnn8-devel-u20.04.sif"
+
+singularity exec -e $IMAGE bash << EOF \
+    > "/scratch/Projects/CFP-01/CFP01-CF-060/kieron/$PBS_JOBNAME.$PBS_JOBID.stdout.log" \
+    2> "/scratch/Projects/CFP-01/CFP01-CF-060/kieron/$PBS_JOBNAME.$PBS_JOBID.stderr.log"
+
+source /hpctmp/e0968891/virtualenvs/cuda/bin/activate
+
+echo "Starting at $(date)"
+
+cd /scratch/Projects/CFP-01/CFP01-CF-060/kieron/blt
+
+torchrun --nproc_per_node=8 \
+    -m bytelatent.train \
+    config=/scratch/Projects/CFP-01/CFP01-CF-060/kieron/blt/bytelatent/configs/blt_1b_olmo_stage2.yaml
+
+echo "Finished at $(date)"
+
+EOF

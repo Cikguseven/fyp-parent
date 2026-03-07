@@ -1,0 +1,59 @@
+#!/bin/bash
+#PBS -P CFP01-CF-060
+#PBS -j oe
+#PBS -k oed
+#PBS -N myte_stage2
+#PBS -q auto
+#PBS -m abe
+#PBS -l select=1:ngpus=8
+#PBS -l walltime=96:00:00
+
+cd /scratch/Projects/CFP-01/CFP01-CF-060/kieron
+
+# 1. Load the .env on the host (useful for host-side logic)
+export $(grep -v '^#' .env | xargs)
+
+cd $PBS_O_WORKDIR
+
+module load singularity
+IMAGE="/app1/common/singularity-img/hopper/pytorch/pytorch_2.8.0_cuda_13.0.sif"
+mkdir -p /scratch/Projects/CFP-01/CFP01-CF-060/kieron/logs
+
+# 2. Pass the WANDB_API_KEY specifically using the APPTAINERENV_ prefix
+# This ensures it bypasses the '-e' wipe.
+export APPTAINERENV_WANDB_API_KEY=$WANDB_API_KEY
+export APPTAINERENV_WANDB_ENTITY="cikguseven-national-university-of-singapore"
+export APPTAINERENV_WANDB_PROJECT="Training"
+
+export APPTAINERENV_TRITON_LIBCUDA_PATH="/usr/local/cuda/compat/lib"
+export APPTAINERENV_LD_LIBRARY_PATH="/usr/local/cuda/compat/lib:${LD_LIBRARY_PATH:-}"
+
+singularity exec --nv -e "$IMAGE" bash << 'EOF' \
+    > "/scratch/Projects/CFP-01/CFP01-CF-060/kieron/olmo/$PBS_JOBNAME.$PBS_JOBID.stdout.log" \
+    2> "/scratch/Projects/CFP-01/CFP01-CF-060/kieron/olmo/$PBS_JOBNAME.$PBS_JOBID.stderr.log"
+
+# --- INSIDE CONTAINER ---
+
+# 3. CLEAN ENVIRONMENT & PATHS
+export PYTHONNOUSERSITE=1
+export MY_LIBS="/scratch/Projects/CFP-01/CFP01-CF-060/kieron/job_libs"
+mkdir -p "$MY_LIBS"
+export PYTHONPATH="/scratch/Projects/CFP-01/CFP01-CF-060/kieron/8192_myte_SEA_1m/OLMo:$MY_LIBS:${PYTHONPATH:-}"
+
+# 4. WANDB DIR
+# Set W&B to write temporary files to scratch instead of the container root
+export WANDB_DIR="/scratch/Projects/CFP-01/CFP01-CF-060/kieron/logs"
+
+export TORCHMETRICS_SKIP_IMAGE_DIST_TESTS=1
+
+# 5. START TRAINING
+mkdir -p /scratch/Projects/CFP-01/CFP01-CF-060/kieron/olmo/evaluation/myte_stage2/
+
+echo "Running Stage 2..."
+torchrun --nproc_per_node=8 \
+/scratch/Projects/CFP-01/CFP01-CF-060/kieron/8192_myte_SEA_1m/OLMo/scripts/train.py \
+/scratch/Projects/CFP-01/CFP01-CF-060/kieron/olmo/myte_stage2.yaml \
+--save_overwrite > /scratch/Projects/CFP-01/CFP01-CF-060/kieron/olmo/myte_stage2.log 2>&1
+
+echo "Done"
+EOF
