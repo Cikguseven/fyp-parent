@@ -102,8 +102,7 @@ def write_model(
 
     print(f"Fetching all parameters from the checkpoint at {input_base_path}.")
 
-    # Not sharded
-    # (The sharded implementation would also work, but this is simpler.)
+    # Unsharded
     loaded = torch.load(os.path.join(input_base_path, "model.pt"), map_location="cpu")
 
     param_count = 0

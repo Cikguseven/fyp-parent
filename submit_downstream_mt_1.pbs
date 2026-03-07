@@ -23,10 +23,11 @@ echo "Starting at $(date)"
 
 cd /scratch/Projects/CFP-01/CFP01-CF-060/kieron/blt/downstream
 
-python old_pipeline_mt.py \
+python pipeline_mt.py \
     --model_path /scratch/Projects/CFP-01/CFP01-CF-060/kieron/blt/tmp/step20k \
     --tokenizer_name blt \
     --entropy_model_path /scratch/Projects/CFP-01/CFP01-CF-060/kieron/blt/blt-entropy/50m_mC4 \
-    --langs id km
+    --flores_dir /scratch/Projects/CFP-01/CFP01-CF-060/kieron/data/flores_test \
+    --langs tl
 
 EOF
