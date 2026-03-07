@@ -6,3 +6,6 @@
 *.log
 *.o*
 .env
+*/.github
+*/ai2_olmo.egg-info
+*/docker
