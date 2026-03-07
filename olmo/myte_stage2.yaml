@@ -78,8 +78,8 @@ save_interval_ephemeral: 100
 save_num_checkpoints_to_keep: 2
 sharded_checkpointer: olmo_core
 
-save_interval_unsharded: 1000
-save_num_unsharded_checkpoints_to_keep: 1
+save_interval_unsharded: 10000
+save_num_unsharded_checkpoints_to_keep: 0
 
 load_path: /scratch/Projects/CFP-01/CFP01-CF-060/kieron/olmo/evaluation/myte_stage1/step115600
 

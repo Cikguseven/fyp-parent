@@ -1,6 +1,6 @@
 #!/bin/bash
 #PBS -P CFP01-CF-060
-#PBS -N olmo_unshard_myte
+#PBS -N olmo_consolidate_bpe
 #PBS -q auto
 #PBS -l select=1:ngpus=1
 #PBS -l walltime=96:00:00
@@ -10,7 +10,7 @@ export APPTAINERENV_TORCHMETRICS_SKIP_IMAGE_DIST_TESTS=1
 
 cd $PBS_O_WORKDIR
 
-mkdir -p /scratch/Projects/CFP-01/CFP01-CF-060/kieron/olmo/evaluation/backup-copy-unshard
+mkdir -p /scratch/Projects/CFP-01/CFP01-CF-060/kieron/olmo/evaluation/backup-copy-consolidated
 
 module load singularity
 IMAGE="/app1/common/singularity-img/hopper/cuda/cuda_12.1.0-cudnn8-devel-u20.04.sif"
@@ -23,12 +23,12 @@ source /hpctmp/e0968891/virtualenvs/olmo/bin/activate
 
 export PYTHONNOUSERSITE=1
 export MY_LIBS="/scratch/Projects/CFP-01/CFP01-CF-060/kieron/job_libs"
-export PYTHONPATH="/scratch/Projects/CFP-01/CFP01-CF-060/kieron/8192_myte_SEA_1m/OLMo:$MY_LIBS:${PYTHONPATH:-}"
+export PYTHONPATH="/scratch/Projects/CFP-01/CFP01-CF-060/code/OLMo:$MY_LIBS:${PYTHONPATH:-}"
 
 echo "Starting at $(date)"
 
-python /scratch/Projects/CFP-01/CFP01-CF-060/kieron/8192_myte_SEA_1m/OLMo/scripts/unshard.py \
-    /scratch/Projects/CFP-01/CFP01-CF-060/kieron/olmo/evaluation/backup-copy/myte_stage1/step60000 \
-    /scratch/Projects/CFP-01/CFP01-CF-060/kieron/olmo/evaluation/backup-copy-unshard
+python /scratch/Projects/CFP-01/CFP01-CF-060/kieron/8192_myte_SEA_1m/OLMo/scripts/convert_olmo2_to_hf_myte_bpe.py \
+    --input_dir /scratch/Projects/CFP-01/CFP01-CF-060/kieron/olmo/evaluation/backup-copy-unshard \
+    --output_dir /scratch/Projects/CFP-01/CFP01-CF-060/kieron/olmo/evaluation/backup-copy-consolidated
 
 EOF

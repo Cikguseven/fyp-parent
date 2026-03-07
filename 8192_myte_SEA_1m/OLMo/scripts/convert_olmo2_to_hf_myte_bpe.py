@@ -11,12 +11,25 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+"""
+Sample usage:
+
+    python convert_olmo2_to_hf_myte_bpe.py \
+        --input_dir /path/to/olmo2/weights \
+        --output_dir /output/path \
+        --tokenizer_type myte
+
+Afterwards, models can be loaded via:
+
+    from transformers import Olmo2ForCausalLM, AutoTokenizer
+    model = Olmo2ForCausalLM.from_pretrained("/output/path")
+    tokenizer = AutoTokenizer.from_pretrained("/output/path")
+
+Note: the whole model must fit in RAM to run this script.
+"""
 
 import argparse
-from email import parser
-from email.mime import text
 import gc
-from importlib.resources import path
 import json
 import os
 import shutil
@@ -25,7 +38,6 @@ from typing import Any, Dict, Optional
 
 import torch
 import yaml
-from tokenizers import Tokenizer
 from transformers import (
     AutoTokenizer,
     Olmo2Config,
@@ -33,51 +45,29 @@ from transformers import (
     PreTrainedTokenizerFast,
 )
 
-"""
-Sample usage:
 
-python src/transformers/models/olmo2/convert_olmo2_to_hf.py
---input_dir /path/to/downloaded/olmo2/weights --output_dir /output/path
-text
+# ---------------------------------------------------------------------------
+# Per-tokenizer EOS and vocab-size defaults.
+# These are applied when the checkpoint config reports eos_token_id == 0
+# (a known OLMo bug) and when the config vocab_size disagrees with the
+# tokenizer's actual vocabulary.
+# ---------------------------------------------------------------------------
 
-
-Thereafter, models can be loaded via:
-
-```py
-from transformers import Olmo2ForCausalLM, AutoTokenizer
-
-model = Olmo2ForCausalLM.from_pretrained("/output/path")
-tokenizer = AutoTokenizer.from_pretrained("/output/path")
-
-Important note: you need to be able to host the whole model in RAM to execute this
-script (even if the biggest versions come in several checkpoints they each contain a
-part of each weight of the model, so we need to load them all in RAM).
-"""
-
-'''
----------------------------------------------------------------------------
-Per-tokenizer EOS and vocab-size defaults.
-These are applied when the checkpoint config reports eos_token_id == 0
-(a known OLMo bug) and when the config vocab_size disagrees with the
-tokenizer's actual vocabulary.
----------------------------------------------------------------------------
-'''
 
 TOKENIZER_DEFAULTS: Dict[str, Dict[str, Optional[int]]] = {
-# Original OLMo2 GPT-NeoX / GPT-2-style
-"gpt2": {"eos_token_id": 50279, "vocab_size": None},
-# Morphology-Driven Byte Encoding (MYTE) — 256-byte alphabet re-encoded
-# via Morfessor morpheme mapping; vocab is fixed at 384.
-"myte": {"eos_token_id": 1, "vocab_size": 384},
-# BPE
-"bpe": {"eos_token_id": 90369, "vocab_size": 90372},
+    # Morphology-Driven Byte Encoding (MYTE) — 256-byte alphabet re-encoded
+    # via Morfessor morpheme mapping; vocab is fixed at 384.
+    "myte": {"eos_token_id": 1, "vocab_size": 384},
+    # BPE
+    "bpe": {"eos_token_id": 90369, "vocab_size": 90372},
 }
 
-'''
----------------------------------------------------------------------------
-Helpers
----------------------------------------------------------------------------
-'''
+SUPPORTED_TOKENIZER_TYPES = list(TOKENIZER_DEFAULTS)
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
 
 def compute_intermediate_size(n, ffn_dim_multiplier=1, multiple_of=256):
     return multiple_of * ((int(ffn_dim_multiplier * int(8 * n / 3)) + multiple_of - 1) // multiple_of)
@@ -90,49 +80,54 @@ def write_json(text, path):
     with open(path, "w") as f:
         json.dump(text, f)
 
-'''
----------------------------------------------------------------------------
-Tokenizer-type detection
----------------------------------------------------------------------------
-'''
+
+# ---------------------------------------------------------------------------
+# Tokenizer-type detection
+# ---------------------------------------------------------------------------
 
 def detect_tokenizer_type(tokenizer_config: dict) -> str:
     """
     Infer the tokenizer type from the OLMo tokenizer config block.
-    text
 
-    Returns one of: ``'myte'``, ``'bpe'``, ``'gpt2'``.
+    Returns one of: ``'myte'``, ``'bpe'``.
 
     Detection order:
     1. Fast path: name/path heuristics on the identifier string.
     2. Read ``tokenizer_config.json`` for an explicit ``tokenizer_class`` or
-        ``auto_map`` entry.
-    3. Read ``tokenizer.json`` to check the pre-tokenizer type and decide
-        between ``byte_bpe`` and ``gpt2``.
+       ``auto_map`` entry.
+
+    Raises ``ValueError`` if the type cannot be determined.
     """
     identifier = tokenizer_config.get("identifier", "")
-    id_lower = identifier.lower()
 
-    # Inspect tokenizer_config.json for explicit class names
     tok_cfg_path = Path(identifier) / "tokenizer_config.json"
-    if tok_cfg_path.is_file():
-        with open(tok_cfg_path) as f:
-            tok_cfg = json.load(f)
+    if not tok_cfg_path.is_file():
+        raise ValueError(
+            f"Cannot detect tokenizer type: '{tok_cfg_path}' not found. "
+            "Pass --tokenizer_type explicitly."
+        )
 
-        tok_class = tok_cfg.get("tokenizer_class", "")
-        auto_map  = tok_cfg.get("auto_map", {})
+    with open(tok_cfg_path) as f:
+        tok_cfg = json.load(f)
 
-        if "MyT5Tokenizer" in tok_class or "MyT5Tokenizer" in str(auto_map) or "myt5tokenizer" in tok_class.lower():
-            return "myte"
-        if "PreTrainedTokenizerFast" in tok_class or "PreTrainedTokenizerFast" in str(auto_map) or "pretrainedtokenizerfast" in tok_class.lower():
-            return "bpe"
-    return "gpt2"
+    tok_class = tok_cfg.get("tokenizer_class", "")
+    auto_map  = tok_cfg.get("auto_map", {})
 
-'''
----------------------------------------------------------------------------
-Main conversion entry point
----------------------------------------------------------------------------
-'''
+    if "MyT5Tokenizer" in tok_class or "MyT5Tokenizer" in str(auto_map):
+        return "myte"
+    if "PreTrainedTokenizerFast" in tok_class or "PreTrainedTokenizerFast" in str(auto_map):
+        return "bpe"
+
+    raise ValueError(
+        f"Could not determine tokenizer type from '{tok_cfg_path}'. "
+        "Pass --tokenizer_type explicitly (choices: myte, bpe)."
+    )
+
+
+# ---------------------------------------------------------------------------
+# Main conversion entry point
+# ---------------------------------------------------------------------------
+
 
 def write_model(
     model_path,
@@ -161,31 +156,36 @@ def write_model(
     # Resolve tokenizer type EARLY so EOS / vocab defaults are available
     # before building Olmo2Config.
     # ------------------------------------------------------------------
-    resolved_type: str
     if tokenizer_type is not None:
         resolved_type = tokenizer_type
         print(f"Using explicitly provided tokenizer type: '{resolved_type}'")
     elif include_tokenizer:
-        try:
-            resolved_type = detect_tokenizer_type(full_yaml.get("tokenizer", {}))
-            print(f"Auto-detected tokenizer type: '{resolved_type}'")
-        except Exception as exc:
-            resolved_type = "gpt2"
-            print(f"Tokenizer auto-detection failed ({exc}); defaulting to 'gpt2'.")
+        # Raises ValueError if type cannot be determined — no silent fallback.
+        resolved_type = detect_tokenizer_type(full_yaml.get("tokenizer", {}))
+        print(f"Auto-detected tokenizer type: '{resolved_type}'")
     else:
-        resolved_type = "gpt2"
+        raise ValueError(
+            "Cannot determine tokenizer type when --no_tokenizer is not set. "
+            "Pass --tokenizer_type explicitly (choices: myte, bpe)."
+        )
 
-    tok_defaults = TOKENIZER_DEFAULTS.get(resolved_type, TOKENIZER_DEFAULTS["gpt2"])
+    if resolved_type not in TOKENIZER_DEFAULTS:
+        raise ValueError(
+            f"Unsupported tokenizer type '{resolved_type}'. "
+            f"Choose from: {', '.join(SUPPORTED_TOKENIZER_TYPES)}."
+        )
+
+    tok_defaults = TOKENIZER_DEFAULTS[resolved_type]
 
     # ------------------------------------------------------------------
     # Architecture parameters
     # ------------------------------------------------------------------
-    n_layers               = olmo2_config["n_layers"]
-    n_heads                = olmo2_config["n_heads"]
-    dim                    = olmo2_config["d_model"]
-    dims_per_head          = dim // n_heads
-    base                   = olmo2_config["rope_theta"]
-    inv_freq               = 1.0 / (base ** (torch.arange(0, dims_per_head, 2).float() / dims_per_head))
+    n_layers                = olmo2_config["n_layers"]
+    n_heads                 = olmo2_config["n_heads"]
+    dim                     = olmo2_config["d_model"]
+    dims_per_head           = dim // n_heads
+    base                    = olmo2_config["rope_theta"]
+    inv_freq                = 1.0 / (base ** (torch.arange(0, dims_per_head, 2).float() / dims_per_head))
     max_position_embeddings = olmo2_config["max_sequence_length"]
 
     vocab_size = olmo2_config.get("embedding_size", olmo2_config["vocab_size"])
@@ -224,18 +224,18 @@ def write_model(
             loaded[f"transformer.blocks.{layer_i}.ff_proj.weight"], 2, dim=0
         )
         state_dict = {
-            f"model.layers.{layer_i}.self_attn.q_proj.weight":               q_proj_weight,
-            f"model.layers.{layer_i}.self_attn.k_proj.weight":               k_proj_weight,
-            f"model.layers.{layer_i}.self_attn.v_proj.weight":               v_proj_weight,
-            f"model.layers.{layer_i}.self_attn.o_proj.weight":               loaded[f"transformer.blocks.{layer_i}.attn_out.weight"],
-            f"model.layers.{layer_i}.self_attn.q_norm.weight":               loaded[f"transformer.blocks.{layer_i}.q_norm.weight"],
-            f"model.layers.{layer_i}.self_attn.k_norm.weight":               loaded[f"transformer.blocks.{layer_i}.k_norm.weight"],
-            f"model.layers.{layer_i}.mlp.gate_proj.weight":                  gate_proj_weight,
-            f"model.layers.{layer_i}.mlp.down_proj.weight":                  loaded[f"transformer.blocks.{layer_i}.ff_out.weight"],
-            f"model.layers.{layer_i}.mlp.up_proj.weight":                    up_proj_weight,
-            f"model.layers.{layer_i}.post_attention_layernorm.weight":        loaded[f"transformer.blocks.{layer_i}.attn_norm.weight"],
-            f"model.layers.{layer_i}.post_feedforward_layernorm.weight":      loaded[f"transformer.blocks.{layer_i}.ff_norm.weight"],
-            f"model.layers.{layer_i}.self_attn.rotary_emb.inv_freq":         inv_freq,
+            f"model.layers.{layer_i}.self_attn.q_proj.weight":          q_proj_weight,
+            f"model.layers.{layer_i}.self_attn.k_proj.weight":          k_proj_weight,
+            f"model.layers.{layer_i}.self_attn.v_proj.weight":          v_proj_weight,
+            f"model.layers.{layer_i}.self_attn.o_proj.weight":          loaded[f"transformer.blocks.{layer_i}.attn_out.weight"],
+            f"model.layers.{layer_i}.self_attn.q_norm.weight":          loaded[f"transformer.blocks.{layer_i}.q_norm.weight"],
+            f"model.layers.{layer_i}.self_attn.k_norm.weight":          loaded[f"transformer.blocks.{layer_i}.k_norm.weight"],
+            f"model.layers.{layer_i}.mlp.gate_proj.weight":             gate_proj_weight,
+            f"model.layers.{layer_i}.mlp.down_proj.weight":             loaded[f"transformer.blocks.{layer_i}.ff_out.weight"],
+            f"model.layers.{layer_i}.mlp.up_proj.weight":               up_proj_weight,
+            f"model.layers.{layer_i}.post_attention_layernorm.weight":   loaded[f"transformer.blocks.{layer_i}.attn_norm.weight"],
+            f"model.layers.{layer_i}.post_feedforward_layernorm.weight": loaded[f"transformer.blocks.{layer_i}.ff_norm.weight"],
+            f"model.layers.{layer_i}.self_attn.rotary_emb.inv_freq":    inv_freq,
         }
         for k, v in state_dict.items():
             index_dict["weight_map"][k] = filename
@@ -247,8 +247,8 @@ def write_model(
         "model.embed_tokens.weight": loaded["transformer.wte.weight"],
         "model.norm.weight":         loaded["transformer.ln_f.weight"],
         "lm_head.weight":            loaded["transformer.ff_out.weight"]
-                                    if "transformer.ff_out.weight" in loaded
-                                    else loaded["transformer.wte.weight"],
+                                     if "transformer.ff_out.weight" in loaded
+                                     else loaded["transformer.wte.weight"],
     }
     for k, v in state_dict.items():
         index_dict["weight_map"][k] = filename
@@ -267,7 +267,6 @@ def write_model(
         intermediate_size = (dim * olmo2_config["mlp_ratio"]) // 2
 
     # Fix the OLMo bug where eos_token_id was recorded as 0.
-    # Use the tokenizer-specific default rather than hard-coding 50279.
     eos_token_id = olmo2_config["eos_token_id"]
     if fix_eos_token_id and eos_token_id == 0:
         correct_eos = tok_defaults["eos_token_id"]
@@ -301,7 +300,7 @@ def write_model(
             config=config,
             checkpoint_dir=input_base_path,
             tokenizer_path=tokenizer_path,
-            tokenizer_type=resolved_type,   # always resolved; no re-detection needed
+            tokenizer_type=resolved_type,
         )
 
     print("Loading the checkpoint in an OLMo2 model.")
@@ -312,61 +311,35 @@ def write_model(
     if tmp_cleanup:
         shutil.rmtree(tmp_model_path)
 
-'''
----------------------------------------------------------------------------
-Tokenizer writers
----------------------------------------------------------------------------
-'''
 
-def _write_tokenizer_gpt2(
+# ---------------------------------------------------------------------------
+# Tokenizer writer
+# ---------------------------------------------------------------------------
+
+
+def _write_tokenizer(
     output_path: Path,
     config: Olmo2Config,
     checkpoint_dir: str,
-    input_tokenizer_path: Optional[Path],
-) -> None:
-    """Write a GPT-2-style tokenizer (original OLMo2 behaviour)."""
-    print(f"Saving a {PreTrainedTokenizerFast.name} (gpt2 backend) to {output_path}.")
-
-    if input_tokenizer_path is not None:
-        base_tokenizer = Tokenizer.from_file(str(input_tokenizer_path))
-    else:
-        config_path      = Path(checkpoint_dir) / "config.yaml"
-        tokenizer_config = yaml.safe_load(config_path.read_text())["tokenizer"]
-        identifier       = tokenizer_config["identifier"]
-        if Path(identifier).is_file():
-            base_tokenizer = Tokenizer.from_file(identifier)
-        else:
-            base_tokenizer = Tokenizer.from_pretrained(identifier)
-
-    eos_token_id = config.eos_token_id if config.eos_token_id is not None else base_tokenizer.get_vocab_size() - 1
-    pad_token_id = config.pad_token_id if config.pad_token_id is not None else eos_token_id
-
-    tokenizer = PreTrainedTokenizerFast(
-        tokenizer_object=base_tokenizer,
-        eos_token=base_tokenizer.decode([eos_token_id], skip_special_tokens=False),
-        pad_token=base_tokenizer.decode([pad_token_id], skip_special_tokens=False),
-    )
-    tokenizer.save_pretrained(output_path)
-
-def _write_tokenizer_auto(
-    output_path: Path,
-    config: Olmo2Config,
-    checkpoint_dir: str,
-    input_tokenizer_path: Optional[Path],
-    tokenizer_type: str,
+    tokenizer_path: Optional[Path] = None,
+    tokenizer_type: str = "myte",
 ) -> None:
     """
-    Write a custom tokenizer (myte, bpe) that has already been
+    Write a custom tokenizer (myte or bpe) that has already been
     converted to AutoTokenizer / HF format via convert_myte_tokenizer.py or equivalent.
-    The tokenizer directory must contain a tokenizer_config.json (and optionally an
-    auto_map entry pointing to a local Python file).
     """
+    if tokenizer_type not in TOKENIZER_DEFAULTS:
+        raise ValueError(
+            f"Unknown tokenizer_type '{tokenizer_type}'. "
+            f"Choose from: {', '.join(SUPPORTED_TOKENIZER_TYPES)}."
+        )
+
     config_path = Path(checkpoint_dir) / "config.yaml"
     olmo_tokenizer_cfg = yaml.safe_load(config_path.read_text()).get("tokenizer", {})
     identifier = olmo_tokenizer_cfg.get("identifier", "")
 
-    if input_tokenizer_path is not None:
-        identifier = str(input_tokenizer_path)
+    if tokenizer_path is not None:
+        identifier = str(tokenizer_path)
 
     if not identifier:
         raise ValueError(
@@ -381,9 +354,6 @@ def _write_tokenizer_auto(
         local_files_only=Path(identifier).exists(),
     )
 
-    # Patch special tokens from model config when they disagree with the loaded
-    # tokenizer.  Use convert_ids_to_tokens for a faithful round-trip; fall back
-    # to decode for tokenizers that override convert_ids_to_tokens.
     def _id_to_str(tok_id: int) -> Optional[str]:
         s = tokenizer.convert_ids_to_tokens(tok_id)
         if s is None:
@@ -421,7 +391,6 @@ def _write_tokenizer_auto(
                 class_ref = class_ref[0]
             if not class_ref:
                 continue
-            # class_ref format: "module_name.ClassName"
             module_name = class_ref.split(".")[0]
             src_py = Path(identifier) / f"{module_name}.py"
             dst_py = Path(output_path) / f"{module_name}.py"
@@ -431,33 +400,11 @@ def _write_tokenizer_auto(
 
     print(f"'{tokenizer_type}' tokenizer saved to {output_path}.")
 
-def _write_tokenizer(
-    output_path: Path,
-    config: Olmo2Config,
-    checkpoint_dir: str,
-    tokenizer_path: Optional[Path] = None,
-    tokenizer_type: str = "gpt2",
-) -> None:
-    """
-    Dispatch to the appropriate tokenizer writer.
-    tokenizer_type must already be resolved by the caller (write_model);
-    no further auto-detection is performed here.
-    """
-    if tokenizer_type == "gpt2":
-        _write_tokenizer_gpt2(output_path, config, checkpoint_dir, tokenizer_path)
-    elif tokenizer_type in ("myte", "bpe"):
-        _write_tokenizer_auto(output_path, config, checkpoint_dir, tokenizer_path, tokenizer_type)
-    else:
-        raise ValueError(
-            f"Unknown tokenizer_type '{tokenizer_type}'. "
-            f"Choose from: {', '.join(TOKENIZER_DEFAULTS)}."
-        )
 
-'''
----------------------------------------------------------------------------
-CLI
----------------------------------------------------------------------------
-'''
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
+
 
 def main():
     parser = argparse.ArgumentParser()
@@ -476,21 +423,17 @@ def main():
         "--tokenizer_json_path",
         type=Path,
         default=None,
-        help=(
-            "For 'gpt2': path to a tokenizer.json file. "
-            "For 'myte'/'bpe': path to the pre-converted HF tokenizer directory."
-        ),
+        help="Path to the pre-converted HF tokenizer directory (myte or bpe).",
     )
     parser.add_argument(
         "--tokenizer_type",
         type=str,
         default=None,
-        choices=list(TOKENIZER_DEFAULTS),
+        choices=SUPPORTED_TOKENIZER_TYPES,
         help=(
             "Tokenizer type. If omitted, auto-detected from the checkpoint config. "
             "'myte' uses eos_token_id=1, vocab_size=384. "
-            "'bpe' use eos_token_id=90369, vocab_size=90372. "
-            "'gpt2' uses eos_token_id=50279 (OLMo2 default)."
+            "'bpe' uses eos_token_id=90369, vocab_size=90372."
         ),
     )
     parser.add_argument(
@@ -505,7 +448,7 @@ def main():
         help=(
             "If set, do not fix eos_token_id when it is 0. "
             "The fix replaces 0 with the per-tokenizer default "
-            "(50279 for gpt2, 1 for myte, 90369 for bpe)."
+            "(1 for myte, 90369 for bpe)."
         ),
     )
     parser.add_argument(

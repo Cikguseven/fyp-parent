@@ -1,6 +1,6 @@
 #!/bin/bash
 #PBS -P CFP01-CF-060
-#PBS -N olmo_unshard_myte
+#PBS -N olmo_unshard_bpe
 #PBS -q auto
 #PBS -l select=1:ngpus=1
 #PBS -l walltime=96:00:00
@@ -23,7 +23,7 @@ source /hpctmp/e0968891/virtualenvs/olmo/bin/activate
 
 export PYTHONNOUSERSITE=1
 export MY_LIBS="/scratch/Projects/CFP-01/CFP01-CF-060/kieron/job_libs"
-export PYTHONPATH="/scratch/Projects/CFP-01/CFP01-CF-060/kieron/8192_myte_SEA_1m/OLMo:$MY_LIBS:${PYTHONPATH:-}"
+export PYTHONPATH="/scratch/Projects/CFP-01/CFP01-CF-060/code/OLMo:$MY_LIBS:${PYTHONPATH:-}"
 
 echo "Starting at $(date)"
 
