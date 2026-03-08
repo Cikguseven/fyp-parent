@@ -136,8 +136,42 @@ class MyT5Tokenizer(PreTrainedTokenizer):
 
     model_input_names = ["input_ids", "attention_mask"]
 
-    MERGE_MAP = "/scratch/Projects/CFP-01/CFP01-CF-060/kieron/8192_myte_SEA_1m/morf_map_mc4_8192.json"
-    DECOMPOSE_MAP = "/scratch/Projects/CFP-01/CFP01-CF-060/kieron/8192_myte_SEA_1m/decompose.json"
+    MERGE_MAP = "morf_map_mc4_8192.json"
+    DECOMPOSE_MAP = "decompose.json"
+
+    @staticmethod
+    def _resolve_tokenizer_asset_path(asset: Union[str, os.PathLike, Dict[str, str]], **kwargs):
+        if not isinstance(asset, (str, os.PathLike)):
+            return asset
+
+        asset_path = Path(asset)
+        if asset_path.is_file():
+            return str(asset_path)
+
+        candidate_roots = []
+
+        for key in ("name_or_path", "_name_or_path", "pretrained_model_name_or_path"):
+            value = kwargs.get(key)
+            if value:
+                candidate_roots.append(Path(value))
+
+        tokenizer_file = kwargs.get("tokenizer_file")
+        if tokenizer_file:
+            candidate_roots.append(Path(tokenizer_file).resolve().parent)
+
+        candidate_roots.append(Path.cwd())
+        candidate_roots.append(Path(__file__).resolve().parent)
+
+        tried = []
+        for root in candidate_roots:
+            candidate = root / asset_path
+            tried.append(str(candidate))
+            if candidate.is_file():
+                return str(candidate)
+
+        raise FileNotFoundError(
+            f"Could not find tokenizer asset '{asset}'. Tried: {tried}"
+        )
 
     def __init__(
             self,
@@ -170,6 +204,9 @@ class MyT5Tokenizer(PreTrainedTokenizer):
         self._added_tokens_decoder = {0: pad_token, 1: eos_token, 2: unk_token}
         self.offset = len(self._added_tokens_decoder)
         self._utf_vocab_size = 2**8  # utf is 8 bits
+
+        decompose_map = self._resolve_tokenizer_asset_path(decompose_map, **kwargs)
+        merge_map = self._resolve_tokenizer_asset_path(merge_map, **kwargs)
 
         self.decompose_rewriter = ByteRewriter(decompose_map)
         self.merge_rewriter = ByteRewriter(merge_map)
