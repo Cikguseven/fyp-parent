@@ -348,11 +348,38 @@ def _write_tokenizer(
         )
 
     print(f"Loading '{tokenizer_type}' tokenizer from {identifier}.")
-    tokenizer = AutoTokenizer.from_pretrained(
-        identifier,
-        trust_remote_code=True,
-        local_files_only=Path(identifier).exists(),
-    )
+    identifier_path = Path(identifier).resolve()
+    is_local = identifier_path.exists()
+
+    if is_local:
+        # Load tokenizer files directly to avoid huggingface_hub repo-id validation
+        # on absolute paths (broken in newer huggingface_hub versions).
+        tokenizer_config_path = identifier_path / "tokenizer_config.json"
+        with open(tokenizer_config_path) as f:
+            tok_cfg = json.load(f)
+
+        auto_map = tok_cfg.get("auto_map", {})
+
+        if auto_map.get("AutoTokenizer"):
+            # Custom tokenizer class — add the directory to sys.path so the
+            # module referenced in auto_map can be imported.
+            import sys
+            if str(identifier_path) not in sys.path:
+                sys.path.insert(0, str(identifier_path))
+            tokenizer = AutoTokenizer.from_pretrained(
+                identifier_path,          # Pass Path object, not str
+                trust_remote_code=True,
+            )
+        else:
+            tokenizer = AutoTokenizer.from_pretrained(
+                identifier_path,
+                trust_remote_code=True,
+            )
+    else:
+        tokenizer = AutoTokenizer.from_pretrained(
+            identifier,
+            trust_remote_code=True,
+        )
 
     def _id_to_str(tok_id: int) -> Optional[str]:
         s = tokenizer.convert_ids_to_tokens(tok_id)
@@ -379,6 +406,14 @@ def _write_tokenizer(
             print(f"  Warning: pad_token_id {pad_token_id} not found in vocab; skipping PAD override.")
 
     tokenizer.save_pretrained(output_path)
+
+    if tokenizer_type == "myte":
+        for asset_name in ("decompose.json", "morf_map_mc4_8192.json"):
+            src_asset = Path(identifier) / asset_name
+            dst_asset = Path(output_path) / asset_name
+            if src_asset.is_file() and not dst_asset.is_file():
+                print(f"  Copying tokenizer asset: {src_asset} -> {dst_asset}")
+                shutil.copy(src_asset, dst_asset)
 
     # Copy any local Python file referenced via auto_map so the saved directory
     # is fully self-contained (important for myte's custom tokenizer class).
