@@ -2,8 +2,8 @@
 #PBS -P CFP01-CF-060
 #PBS -N blt_train
 #PBS -q auto
-#PBS -l select=1:ngpus=8
-#PBS -l walltime=96:00:00
+#PBS -l select=1:ngpus=2
+#PBS -l walltime=144:00:00
 #PBS -j oe
 
 cd /scratch/Projects/CFP-01/CFP01-CF-060/kieron
@@ -30,7 +30,7 @@ echo "Starting at $(date)"
 
 cd /scratch/Projects/CFP-01/CFP01-CF-060/kieron/blt
 
-torchrun --nproc_per_node=8 \
+torchrun --nproc_per_node=2 \
     -m bytelatent.train \
     config=/scratch/Projects/CFP-01/CFP01-CF-060/kieron/blt/bytelatent/configs/blt_1b_olmo_stage2.yaml
 
