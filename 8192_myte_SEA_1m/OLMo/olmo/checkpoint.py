@@ -1116,6 +1116,77 @@ class TorchLegacyShardedCheckpointer(Checkpointer):
         assert shard0_md.tensor_properties.dtype == torch.float32, "Expected sharded tensor to be fp32"
         numpy_type = np.float32
 
+        sharded_memory_name = "-".join(key + (str(rank),))
+
+        shm = shared_memory.SharedMemory(
+            create=True, size=rank_size * np.dtype(numpy_type).itemsize, name=sharded_memory_name
+        )
+        np_arr = np.ndarray((rank_size,), dtype=numpy_type, buffer=shm.buf)
+
+        for local_shard in sharded_tensor.local_shards():
+            shard_rank = cast(_remote_device, local_shard.metadata.placement).rank()
+            assert shard_rank == rank
+
+            src = local_shard.tensor.flatten()
+            shard_offset = shard_placement[local_shard.metadata][1]
+
+            np_arr[shard_offset : shard_offset + src.numel()] = src.numpy()
+
+        shm.close()
+
+    def _copy_sharded_data_to_shared_mem(self, world_size: int, shard_filepath: Path):
+        shard_number = int(shard_filepath.name[4:-3])
+        log.info("Starting unsharding shard number %d to shared memory", shard_number)
+
+        with self._patch_sharded_tensor_load():
+            shard = torch.load(shard_filepath, map_location="cpu")
+            log.debug("Done loading shard number %d", shard_number)
+
+        self._copy_sharded_tensors_to_shared_mem(
+            shard, world_size, shard_number, (str(shard_filepath.parent).replace("/", "_"),)
+        )
+        log.info("Done unsharding shard number %d to shared memory", shard_number)
+
+    def _unshard_using_sharded_mem(
+        self, state: Any, world_size: int, device: torch.device, shard_dir: PathOrStr
+    ) -> Any:
+        return self._unshard_state_using_shared_mem(state, world_size, device, (str(shard_dir).replace("/", "_"),))
+
+    def _unshard_state_using_shared_mem(
+        self, state: Any, world_size: int, device: torch.device, key: Tuple
+    ) -> Any:
+        if isinstance(state, (list, tuple, set)):
+            return state.__class__(
+                self._unshard_state_using_shared_mem(sub_state, world_size, device, key + (i,))
+                for i, sub_state in enumerate(state)
+            )
+        elif isinstance(state, dict):
+            return {
+                name: self._unshard_state_using_shared_mem(state[name], world_size, device, key + (name,))
+                for name in state.keys()
+            }
+        elif isinstance(state, ShardedTensor):
+            return self._unshard_tensor_using_shared_mem(state, world_size, device, key)
+        elif isinstance(state, torch.Tensor):
+            return state.to(device=device)
+        else:
+            return state
+
+    def _unshard_tensor_using_shared_mem(
+        self, sharded_tensor: ShardedTensor, world_size: int, device: torch.device, key: Tuple
+    ) -> torch.Tensor:
+        shard0_md = sharded_tensor.metadata()
+
+        def shard_size(shard_md):
+            return reduce((lambda x, y: x * y), shard_md.shard_sizes)  # type: ignore[attr-defined]
+
+        shard_placement, rank_sizes = self._get_shard_placement_and_rank_sizes(
+            shard0_md.shards_metadata, world_size
+        )
+
+        assert shard0_md.tensor_properties.dtype == torch.float32, "Expected sharded tensor to be fp32"
+        numpy_type = np.float32
+
         out = torch.empty(
             *sharded_tensor.metadata().size, dtype=sharded_tensor.metadata().tensor_properties.dtype, device=device
         )
@@ -1679,62 +1750,245 @@ class LocalShardedCheckpointer(Checkpointer):
         device: Optional[torch.device] = None,
     ) -> Tuple[Dict[str, torch.Tensor], Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
         device = device or torch.device("cpu")
-        load_path = Path(load_path)
-
-        # Load metadata.
         metadata = self._load_metadata(load_path, local_cache=local_cache)
-        world_size = metadata.world_size
 
-        # Collect all model shards.
-        model_state_dicts = []
-        for rank in range(world_size):
-            log.info("Loading model shard %d / %d ...", rank + 1, world_size)
-            model_state_dicts.append(
-                load_state_dict(load_path, f"model/rank{rank}.pt", local_cache=local_cache, map_location="cpu")
-            )
+        # Gather paths model state, potentially downloading them.
+        log.info("Gathering model state dicts...")
+        model_state_paths = self._gather_state_dict_paths(
+            load_path, "model", metadata.world_size, local_cache=local_cache
+        )
 
-        # Build full model state dict from flat param shards.
-        log.info("Unsharding model state...")
-        model_state: Dict[str, torch.Tensor] = {}
-        for rank, model_state_dict in enumerate(model_state_dicts):
-            for fqn, flat_param_shard in self._iter_flat_param_shards(model_state_dict):
-                if fqn not in model_state:
-                    model_state[fqn] = torch.zeros(*flat_param_shard.full_shape, device=device)
-                flat_param_shard.copy_into(model_state[fqn])
-        del model_state_dicts
+        # Load model state dicts one-by-one, materializing and populating the full parameters as we go.
+        log.info("Materializing full parameters...")
+        full_model_state: Dict[str, torch.Tensor] = {}
+        # We keep a copy of the flat param metadata minus the actual tensors so we can reconstruct
+        # the full optimizer state below without having to reload the model state dicts.
+        flat_params_data: Dict[int, Dict[str, _FlatParamShard]] = defaultdict(dict)
+        for rank, path in enumerate(model_state_paths):
+            log.info(f"Loading shards from rank {rank}...")
+            model_state = torch.load(path, map_location="cpu")
+            for root_fqn, flat_param_shard in self._iter_flat_param_shards(model_state):
+                if root_fqn not in full_model_state:
+                    log.info(
+                        f"Materializing full parameter '{root_fqn}' with shape {flat_param_shard.full_shape}..."
+                    )
+                    assert flat_param_shard.shard_data is not None
+                    full_model_state[root_fqn] = torch.empty(
+                        flat_param_shard.full_shape, dtype=flat_param_shard.shard_data.dtype, device=device
+                    )
+                    # Fill with NaNs so we can validate that the whole parameter has been populated
+                    # afterwards.
+                    full_model_state[root_fqn].fill_(torch.nan)
+                # Copy over the local shard to the relevant part of the full parameter.
+                full_param = full_model_state[root_fqn]
+                log.info(f"Loading rank {rank} shard for '{root_fqn}'...")
+                flat_param_shard.copy_into(full_param)
+                flat_params_data[rank][root_fqn] = replace(flat_param_shard, shard_data=None)
 
-        optim_state: Optional[Dict[str, Any]] = None
-        if load_optimizer_state:
-            log.info("Unsharding optimizer state...")
-            optim_state = self._unshard_optim_state(load_path, world_size, local_cache=local_cache)
+        log.info("Validating full parameters...")
+        for key, tensor in full_model_state.items():
+            if torch.isnan(tensor).any():
+                raise ValueError(f"Parameter '{key}' contains NaNs, this is likely a bug with the unsharder")
 
         trainer_state: Optional[Dict[str, Any]] = None
         if load_trainer_state:
             trainer_state = load_state_dict(load_path, "train/rank0.pt", local_cache=local_cache)
 
-        return model_state, optim_state, trainer_state
+        if not load_optimizer_state:
+            return full_model_state, None, trainer_state
 
-    def _unshard_optim_state(
+        log.info("Gathering optim state dicts...")
+        optim_state_paths = self._gather_state_dict_paths(
+            load_path, "optim", metadata.world_size, local_cache=local_cache
+        )
+
+        log.info("Materializing full optim state...")
+        full_optim_state: Dict[str, Any] = {"state": defaultdict(dict)}
+        fqn_to_id: Dict[str, int] = {}
+        id_to_fqn: Dict[int, str] = {}
+        for rank, path in enumerate(optim_state_paths):
+            log.info(f"Loading sharded optim state from rank {rank}...")
+            optim_state = torch.load(path, map_location="cpu")
+
+            # Initialize param groups.
+            # We assume parameter groups are the same across all ranks.
+            # The only thing that differs across ranks is the state for each local sharded param.
+            if "param_groups" not in full_optim_state:
+                full_optim_state["param_groups"] = optim_state["param_groups"]
+            else:
+                assert full_optim_state["param_groups"] == optim_state["param_groups"]
+
+            # Generate mapping of parameter FQNs to optimizer param IDs and vice-versa.
+            if not fqn_to_id or not id_to_fqn:
+                for group in full_optim_state["param_groups"]:
+                    for fqn, id in zip(group["param_names"], group["params"]):
+                        fqn = fqn.replace("_fsdp_wrapped_module.", "")
+                        fqn_to_id[fqn] = id
+                        id_to_fqn[id] = fqn
+
+            # Iterate over local shard state and copy into the full state.
+            for id, shard_state in optim_state["state"].items():
+                fqn = id_to_fqn[id]
+                flat_param_shard = flat_params_data[rank].get(fqn)  # type: ignore[assignment]
+                full_state = full_optim_state["state"][id]
+                for key, shard_value in shard_state.items():
+                    assert isinstance(shard_value, torch.Tensor)
+                    if shard_value.shape == torch.Size([]):
+                        # Add singleton tensors directly to full state. These should be the same across
+                        # all ranks.
+                        assert key in ("step", "grad_norm_exp_avg")  # sanity check
+                        if key not in full_state:
+                            full_state[key] = shard_value.to(device)
+                        else:
+                            assert full_state[key] == shard_value
+                    else:
+                        # Otherwise we have a sharded param state.
+                        # If the corresponding full param state hasn't been materialized yet, do so now.
+                        assert flat_param_shard is not None, f"missing flat_params_data for {fqn} from rank {rank}"
+                        if key not in full_state:
+                            log.info(
+                                f"Materializing full state '{key}' for '{fqn}' with shape {flat_param_shard.full_shape}..."
+                            )
+                            full_state[key] = torch.empty(
+                                flat_param_shard.full_shape, dtype=shard_value.dtype, device=device
+                            )
+                        full_state_value = full_state[key]
+
+                        # Copy over the local shard state to the relevant part of the full parameter state.
+                        log.info(f"Loading rank {rank} shard state of '{key}' for '{fqn}'...")
+                        replace(flat_param_shard, shard_data=shard_value).copy_into(full_state_value)
+
+        # Lastly, clean up the parameter names in param groups.
+        for group in full_optim_state["param_groups"]:
+            group["param_names"] = [n.replace("_fsdp_wrapped_module.", "") for n in group["param_names"]]
+
+        return full_model_state, full_optim_state, trainer_state
+
+    def _get_state_dict_path(
         self,
-        load_path: Path,
+        load_path: PathOrStr,
+        state_dict_type: str,
+        rank: int,
+        *,
+        local_cache: Optional[PathOrStr] = None,
+        progress=None,
+    ) -> Tuple[int, Path]:
+        fname = f"{state_dict_type}/rank{rank}.pt"
+        return rank, resource_path(str(load_path).rstrip("/"), fname, local_cache=local_cache, progress=progress)
+
+    def _gather_state_dict_paths(
+        self,
+        load_path: PathOrStr,
+        state_dict_type: str,
         world_size: int,
         *,
         local_cache: Optional[PathOrStr] = None,
+    ) -> List[Path]:
+        progress = get_progress_bar()
+        with ThreadPoolExecutor(max_workers=self.thread_count) as executor:
+            futures = []
+            for rank in range(world_size):
+                future = executor.submit(
+                    self._get_state_dict_path,
+                    load_path,
+                    state_dict_type,
+                    rank,
+                    local_cache=local_cache,
+                    progress=progress,
+                )
+                futures.append(future)
+
+            results: Dict[int, Path] = {}
+            for future in as_completed(futures):
+                rank, path = future.result()
+                results[rank] = path
+
+        return [results[rank] for rank in range(world_size)]
+
+
+class OlmoCoreCheckpointer(Checkpointer):
+    def save_checkpoint(
+        self,
+        dir: PathOrStr,
+        dist_model: nn.Module,
+        optim: Optimizer,
+        trainer_state: Dict[str, Any],
+        *,
+        upload_to: Optional[str] = None,
+    ) -> None:
+        from olmo_core.distributed.checkpoint import (  # type: ignore
+            save_model_and_optim_state,
+        )
+
+        with self._temporary_wd(dir) as checkpoint_dir:
+            log.info("Saving model and optim state...")
+            if get_fs_local_rank() == 0:
+                (checkpoint_dir / "model").mkdir(exist_ok=True, parents=True)
+                (checkpoint_dir / "optim").mkdir(exist_ok=True, parents=True)
+                (checkpoint_dir / "train").mkdir(exist_ok=True, parents=True)
+            barrier()
+
+            wait_for(
+                lambda: (checkpoint_dir / "model").exists(), "Waiting for checkpoint model directory", timeout=10.0
+            )
+
+            wait_for(
+                lambda: (checkpoint_dir / "optim").exists(), "Waiting for checkpoint optim directory", timeout=10.0
+            )
+
+            wait_for(
+                lambda: (checkpoint_dir / "train").exists(), "Waiting for checkpoint train directory", timeout=10.0
+            )
+
+            local_files_created = save_model_and_optim_state(
+                checkpoint_dir, dist_model, optim, save_overwrite=self.cfg.save_overwrite
+            )
+            if upload_to is not None:
+                for path in local_files_created:
+                    path = Path(path)
+                    upload_target = f"{upload_to.rstrip('/')}/{path.relative_to(checkpoint_dir)}"
+                    log.info(f"Uploading {path} to {upload_target}...")
+                    upload(path, upload_target, save_overwrite=self.cfg.save_overwrite)
+
+            log.info("Saving trainer state...")
+            save_state_dict(
+                checkpoint_dir,
+                f"train/rank{get_global_rank()}.pt",
+                trainer_state,
+                upload_to=upload_to,
+                save_overwrite=self.cfg.save_overwrite,
+            )
+
+            self._save_config(checkpoint_dir, upload_to=upload_to)
+
+    def restore_checkpoint(
+        self,
+        load_path: PathOrStr,
+        dist_model: nn.Module,
+        optim: Optimizer,
+        *,
+        local_cache: Optional[PathOrStr] = None,
+        load_optimizer_state: bool = True,
     ) -> Dict[str, Any]:
-        # Load all optim shards and merge them.
-        # For local sharded checkpoints the optim state is saved per-rank already unsharded
-        # so we just return rank 0's state.
-        return load_state_dict(load_path, "optim/rank0.pt", local_cache=local_cache, map_location="cpu")
+        from olmo_core.distributed.checkpoint import (  # type: ignore
+            load_model_and_optim_state,
+        )
 
-    # ...existing code...
+        log.info("Loading model and optim state...")
+        load_model_and_optim_state(load_path, dist_model, optim if load_optimizer_state else None)
 
+        log.info("Loading trainer state...")
+        try:
+            trainer_state = load_state_dict(
+                load_path, f"train/rank{get_global_rank()}.pt", local_cache=local_cache
+            )
+        except FileNotFoundError:
+            # Fall back to rank 0 train state.
+            # This can happen when we're restoring a checkpoint with a different world size.
+            trainer_state = load_state_dict(load_path, "train/rank0.pt", local_cache=local_cache)
 
-class OlmoCoreCheckpointer(LocalShardedCheckpointer):
-    """
-    Checkpointer for checkpoints saved with the olmo_core sharded checkpointer type.
-    Uses olmo_core's own unshard_checkpoint utility to convert sharded checkpoints
-    into unsharded state dicts.
-    """
+        barrier()
+        return trainer_state
 
     def unshard_checkpoint(
         self,
@@ -1745,48 +1999,19 @@ class OlmoCoreCheckpointer(LocalShardedCheckpointer):
         load_trainer_state: bool = True,
         device: Optional[torch.device] = None,
     ) -> Tuple[Dict[str, torch.Tensor], Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
-        device = device or torch.device("cpu")
-
-        try:
-            from olmo_core.distributed.checkpoint import unshard_checkpoint as olmo_unshard
-
-            import tempfile
-            with tempfile.TemporaryDirectory() as tmp_dir:
-                log.info("Unsharding olmo_core checkpoint from %s to temp dir %s ...", load_path, tmp_dir)
-                model_path, optim_path = olmo_unshard(
-                    load_path,
-                    tmp_dir,
-                    optim=load_optimizer_state,
-                    save_overwrite=True,
-                )
-
-                log.info("Loading unsharded model state from %s ...", model_path)
-                model_state = torch.load(model_path, map_location=device, weights_only=False)
-
-                optim_state: Optional[Dict[str, Any]] = None
-                if load_optimizer_state and optim_path is not None:
-                    log.info("Loading unsharded optimizer state from %s ...", optim_path)
-                    optim_state = torch.load(optim_path, map_location=device, weights_only=False)
-
-            trainer_state: Optional[Dict[str, Any]] = None
-            if load_trainer_state:
-                try:
-                    trainer_state = load_state_dict(load_path, "train/rank0.pt", local_cache=local_cache)
-                except FileNotFoundError:
-                    log.warning("No trainer state found at %s/train/rank0.pt", load_path)
-
-            return model_state, optim_state, trainer_state
-
-        except (ImportError, Exception) as e:
-            log.warning("olmo_core unshard_checkpoint failed (%s), falling back to LocalShardedCheckpointer", e)
-
-        return super().unshard_checkpoint(
-            load_path,
-            local_cache=local_cache,
-            load_optimizer_state=load_optimizer_state,
-            load_trainer_state=load_trainer_state,
-            device=device,
+        from olmo_core.distributed.checkpoint import (  # type: ignore
+            unshard_model_state,
+            unshard_optim_state,
         )
+
+        model_state = unshard_model_state(load_path, device=device)
+        optim_state: Optional[Dict[str, Any]] = None
+        train_state: Optional[Dict[str, Any]] = None
+        if load_optimizer_state:
+            optim_state = cast(Dict[str, Any], unshard_optim_state(load_path, device=device))
+        if load_trainer_state:
+            train_state = load_state_dict(load_path, "train/rank0.pt", local_cache=local_cache)
+        return model_state, optim_state, train_state
 
 
 def build_sharded_checkpointer(

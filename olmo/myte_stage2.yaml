@@ -70,7 +70,7 @@ tokenizer:
   truncate_direction: right
   use_transformers_tokenizer: true
 
-save_folder: /scratch/Projects/CFP-01/CFP01-CF-060/kieron/olmo/evaluation/myte_stage2
+save_folder: /scratch/Projects/CFP-01/CFP01-CF-060/kieron/olmo/evaluation/myte_stage2 # Change to your desired save folder
 save_overwrite: true
 
 save_interval: 500
@@ -81,13 +81,13 @@ sharded_checkpointer: olmo_core
 save_interval_unsharded: 10000
 save_num_unsharded_checkpoints_to_keep: 0
 
-load_path: /scratch/Projects/CFP-01/CFP01-CF-060/kieron/olmo/evaluation/myte_stage1/step115500
+load_path: /scratch/Projects/CFP-01/CFP01-CF-060/kieron/olmo/evaluation/myte_stage1/step115500 # Change to the stage1 checkpoint to load from
 
 restore_dataloader: true
 no_pre_train_checkpoint: true
 
 max_duration: 1ep
-stop_at: 128460 # Change to 100% of total steps
+stop_at: 128460
 global_train_batch_size: 512
 device_train_microbatch_size: 8
 
@@ -140,4 +140,4 @@ data:
     repetition_max_period: 13
     repetition_min_period: 1
     repetition_max_count: 32
-  paths: ${path.glob:/scratch/Projects/CFP-01/CFP01-CF-060/kieron/data/fineweb2_SEA_100M_sentences_myte/*.npy}
+  paths: ${path.glob:/scratch/Projects/CFP-01/CFP01-CF-060/kieron/data/fineweb2_SEA_100M_sentences_myte/*.npy} # Change to your data paths

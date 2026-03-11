@@ -70,7 +70,7 @@ tokenizer:
   truncate_direction: right
   use_transformers_tokenizer: true
 
-save_folder: /scratch/Projects/CFP-01/CFP01-CF-060/kieron/olmo/evaluation/myte_stage1
+save_folder: /scratch/Projects/CFP-01/CFP01-CF-060/kieron/olmo/evaluation/myte_stage1 # point to save checkpoint folder for stage2
 save_overwrite: true
 
 save_interval: 500 # steps
@@ -81,7 +81,10 @@ sharded_checkpointer: olmo_core
 save_interval_unsharded: 10000
 save_num_unsharded_checkpoints_to_keep: 0
 
-load_path: /scratch/Projects/CFP-01/CFP01-CF-060/kieron/olmo/evaluation/backup/myte_stage1/step60000
+load_path: /scratch/Projects/CFP-01/CFP01-CF-060/kieron/olmo/evaluation/step60000 # point to sharded checkpoint folder
+
+restore_dataloader: true
+no_pre_train_checkpoint: true
 
 max_duration: 1ep
 stop_at: 115500 # 90% of tokens
@@ -103,7 +106,7 @@ speed_monitor:
 
 gen1_gc_interval: 10
 
-eval_interval: 5000 #UPDATE AFTER TOKENIZATION OF DATASET
+eval_interval: 5000
 eval_subset_num_batches: -1
 device_eval_batch_size: ${device_train_microbatch_size}
 evaluators:
@@ -125,7 +128,6 @@ evaluators:
 data:
   shuffle: true
   pad_direction: right
-  # generate_doc_lengths: true
   num_workers: 32
   drop_last: true
   pin_memory: true
@@ -137,4 +139,4 @@ data:
     repetition_max_period: 13
     repetition_min_period: 1
     repetition_max_count: 32
-  paths: ${path.glob:/scratch/Projects/CFP-01/CFP01-CF-060/kieron/data/fineweb2_SEA_100M_sentences_myte/*.npy}
+  paths: ${path.glob:/scratch/Projects/CFP-01/CFP01-CF-060/kieron/data/fineweb2_SEA_100M_sentences_myte/*.npy} # update
